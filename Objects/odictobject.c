@@ -2256,7 +2256,22 @@ mutablemapping_add_pairs(PyObject *self, PyObject *pairs)
     while ((pair = PyIter_Next(iterator)) != NULL) {
         /* could be more efficient (see UNPACK_SEQUENCE in ceval.c) */
         PyObject *key = NULL, *value = NULL;
-        PyObject *pair_iterator = PyObject_GetIter(pair);
+        PyObject *pair_iterator = NULL;
+
+        /* Nearly every caller hands us 2-tuples; unpacking those directly
+           avoids building and draining an iterator for each one. */
+        if (PyTuple_CheckExact(pair) && PyTuple_GET_SIZE(pair) == 2) {
+            key = Py_NewRef(PyTuple_GET_ITEM(pair, 0));
+            value = Py_NewRef(PyTuple_GET_ITEM(pair, 1));
+            goto have_pair;
+        }
+        if (PyList_CheckExact(pair) && PyList_GET_SIZE(pair) == 2) {
+            key = Py_NewRef(PyList_GET_ITEM(pair, 0));
+            value = Py_NewRef(PyList_GET_ITEM(pair, 1));
+            goto have_pair;
+        }
+
+        pair_iterator = PyObject_GetIter(pair);
         if (pair_iterator == NULL)
             goto Done;
 
@@ -2286,6 +2301,7 @@ mutablemapping_add_pairs(PyObject *self, PyObject *pairs)
         else if (PyErr_Occurred())
             goto Done;
 
+have_pair:
         if (!presized) {
             presized = 1;
             int uni = PyUnicode_CheckExact(key)
