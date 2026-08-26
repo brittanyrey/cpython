@@ -975,20 +975,29 @@ _io__RawIOBase_readall_impl(PyObject *self)
         return NULL;
     }
 
+    /* The chunk size never varies, so build it once instead of letting
+       _PyObject_CallMethod() parse a format and box it on every read. */
+    PyObject *chunk_size = PyLong_FromLong(DEFAULT_BUFFER_SIZE);
+    if (chunk_size == NULL) {
+        PyBytesWriter_Discard(writer);
+        return NULL;
+    }
+
+    PyObject *result = NULL;
     while (1) {
-        PyObject *data = _PyObject_CallMethod(self, &_Py_ID(read),
-                                              "i", DEFAULT_BUFFER_SIZE);
+        PyObject *data = PyObject_CallMethodOneArg(self, &_Py_ID(read),
+                                                   chunk_size);
         if (!data) {
             /* NOTE: PyErr_SetFromErrno() calls PyErr_CheckSignals()
                when EINTR occurs so we needn't do it ourselves. */
             if (_PyIO_trap_eintr()) {
                 continue;
             }
-            PyBytesWriter_Discard(writer);
-            return NULL;
+            goto error;
         }
         if (data == Py_None) {
             if (PyBytesWriter_GetSize(writer) == 0) {
+                Py_DECREF(chunk_size);
                 PyBytesWriter_Discard(writer);
                 return data;
             }
@@ -998,8 +1007,7 @@ _io__RawIOBase_readall_impl(PyObject *self)
         if (!PyBytes_Check(data)) {
             Py_DECREF(data);
             PyErr_SetString(PyExc_TypeError, "read() should return bytes");
-            PyBytesWriter_Discard(writer);
-            return NULL;
+            goto error;
         }
         if (PyBytes_GET_SIZE(data) == 0) {
             /* EOF */
@@ -1010,12 +1018,18 @@ _io__RawIOBase_readall_impl(PyObject *self)
                                      PyBytes_AS_STRING(data),
                                      PyBytes_GET_SIZE(data)) < 0) {
             Py_DECREF(data);
-            PyBytesWriter_Discard(writer);
-            return NULL;
+            goto error;
         }
         Py_DECREF(data);
     }
-    return PyBytesWriter_Finish(writer);
+    result = PyBytesWriter_Finish(writer);
+    Py_DECREF(chunk_size);
+    return result;
+
+error:
+    Py_DECREF(chunk_size);
+    PyBytesWriter_Discard(writer);
+    return NULL;
 }
 
 static PyObject *
