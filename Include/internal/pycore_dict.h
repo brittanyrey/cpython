@@ -454,6 +454,9 @@ typedef struct {
 #define _PyFrozenDictObject_CAST(op) \
     (assert(PyFrozenDict_Check(op)), _Py_CAST(PyFrozenDictObject*, (op)))
 
+// Grow an existing dict for `minused` further insertions.
+extern int _PyDict_Presize(PyObject *op, Py_ssize_t minused, int unicode);
+
 #ifdef __cplusplus
 }
 #endif

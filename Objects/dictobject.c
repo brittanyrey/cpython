@@ -2374,6 +2374,24 @@ _PyDict_NewPresized(Py_ssize_t minused)
     return dict_new_presized(minused, false);
 }
 
+/* Grow an existing (empty or small) dict so `minused` entries can be inserted
+   without further resizing.  `unicode` must describe the keys about to go in:
+   a generic table cannot be resized back into a unicode one, and presizing as
+   unicode would have the first non-str key drop straight back to MINSIZE. */
+int
+_PyDict_Presize(PyObject *op, Py_ssize_t minused, int unicode)
+{
+    assert(PyDict_Check(op));
+    PyDictObject *mp = (PyDictObject *)op;
+    unicode = unicode && DK_IS_UNICODE(mp->ma_keys);
+    if (minused <= USABLE_FRACTION(PyDict_MINSIZE)
+        || (unicode == !!DK_IS_UNICODE(mp->ma_keys)
+            && minused <= USABLE_FRACTION(DK_SIZE(mp->ma_keys)))) {
+        return 0;
+    }
+    return dictresize(mp, estimate_log2_keysize(minused), unicode);
+}
+
 PyObject *
 _PyDict_FromItems(PyObject *const *keys, Py_ssize_t keys_offset,
                   PyObject *const *values, Py_ssize_t values_offset,

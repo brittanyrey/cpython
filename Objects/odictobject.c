@@ -1251,6 +1251,16 @@ OrderedDict_copy_impl(PyObject *od)
     if (od_copy == NULL)
         return NULL;
 
+    /* Size the target once.  Besides the dict's own regrowth this also stops
+       _odict_resize() rebuilding the fast-node mirror at every step. */
+    if (PyODict_CheckExact(od_copy)) {
+        int unicode = DK_IS_UNICODE(((PyDictObject *)od)->ma_keys);
+        if (_PyDict_Presize(od_copy, PyODict_SIZE(od), unicode) < 0) {
+            Py_DECREF(od_copy);
+            return NULL;
+        }
+    }
+
     /* The loop body may run arbitrary Python code which could mutate od and
        free its nodes (gh-148660); detect that the same way __eq__ does. */
     size_t state = _PyODictObject_CAST(od)->od_state;
@@ -2233,6 +2243,16 @@ mutablemapping_add_pairs(PyObject *self, PyObject *pairs)
     if (iterator == NULL)
         return -1;
 
+    /* Size from the length hint, deferred to the first key so the table kind
+       matches it.  Only exact OrderedDicts: a subclass may override
+       __setitem__ and not land in our dict at all. */
+    Py_ssize_t hint = PyObject_LengthHint(pairs, 0);
+    if (hint < 0) {
+        PyErr_Clear();
+        hint = 0;
+    }
+    int presized = !(hint > 0 && PyODict_CheckExact(self));
+
     while ((pair = PyIter_Next(iterator)) != NULL) {
         /* could be more efficient (see UNPACK_SEQUENCE in ceval.c) */
         PyObject *key = NULL, *value = NULL;
@@ -2266,6 +2286,13 @@ mutablemapping_add_pairs(PyObject *self, PyObject *pairs)
         else if (PyErr_Occurred())
             goto Done;
 
+        if (!presized) {
+            presized = 1;
+            int uni = PyUnicode_CheckExact(key)
+                      && DK_IS_UNICODE(((PyDictObject *)self)->ma_keys);
+            if (_PyDict_Presize(self, hint, uni) < 0)
+                goto Done;
+        }
         res = PyObject_SetItem(self, key, value);
 
 Done:
