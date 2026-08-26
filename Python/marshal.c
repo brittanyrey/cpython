@@ -1531,6 +1531,9 @@ r_object(RFILE *p)
         }
         else {
             v = (type == TYPE_SET) ? PySet_New(NULL) : PyFrozenSet_New(NULL);
+            if (v != NULL && _PySet_Presize(v, n) < 0) {
+                Py_CLEAR(v);
+            }
             if (type == TYPE_SET) {
                 R_REF(v);
             } else {

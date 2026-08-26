@@ -3148,6 +3148,25 @@ PySet_Add(PyObject *anyset, PyObject *key)
 }
 
 int
+_PySet_Presize(PyObject *anyset, Py_ssize_t n)
+{
+    if (PySet_Check(anyset)) {
+        int rv;
+        Py_BEGIN_CRITICAL_SECTION(anyset);
+        rv = set_presize((PySetObject *)anyset, n);
+        Py_END_CRITICAL_SECTION();
+        return rv;
+    }
+
+    if (PyFrozenSet_Check(anyset) && _PyObject_IsUniquelyReferenced(anyset)) {
+        return set_presize((PySetObject *)anyset, n);
+    }
+
+    PyErr_BadInternalCall();
+    return -1;
+}
+
+int
 _PySet_NextEntry(PyObject *set, Py_ssize_t *pos, PyObject **key, Py_hash_t *hash)
 {
     setentry *entry;

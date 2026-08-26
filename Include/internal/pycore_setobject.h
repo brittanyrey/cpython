@@ -35,6 +35,9 @@ extern void _PySet_ClearInternal(PySetObject *so);
 
 PyAPI_FUNC(int) _PySet_AddTakeRef(PySetObject *so, PyObject *key);
 
+// Size a set for `n` further additions, under the same rules as PySet_Add().
+extern int _PySet_Presize(PyObject *anyset, Py_ssize_t n);
+
 PyObject *
 _PySet_Freeze(PyObject *set);
 
