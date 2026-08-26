@@ -3455,6 +3455,25 @@ dict_set_fromkeys(PyDictObject *mp, PyObject *iterable, PyObject *value)
     return mp;
 }
 
+/* Do one big resize before the first key goes in, rather than incrementally
+ * resizing as we insert.  Deferring to the first key lets us size the table for
+ * its kind; a generic table cannot be resized back into a unicode one.
+ */
+static int
+fromkeys_presize(PyDictObject *mp, Py_ssize_t hint, PyObject *first_key)
+{
+    if (hint <= 0 || hint > PY_SSIZE_T_MAX/4 - mp->ma_used) {
+        return 0;
+    }
+    Py_ssize_t minused = mp->ma_used + hint;
+    if (minused <= USABLE_FRACTION(PyDict_MINSIZE)
+        || minused <= USABLE_FRACTION(DK_SIZE(mp->ma_keys))) {
+        return 0;
+    }
+    int unicode = DK_IS_UNICODE(mp->ma_keys) && PyUnicode_CheckExact(first_key);
+    return dictresize(mp, estimate_log2_keysize(minused), unicode);
+}
+
 /* Internal version of dict.from_keys().  It is subclass-friendly. */
 PyObject *
 _PyDict_FromKeys(PyObject *cls, PyObject *iterable, PyObject *value)
@@ -3555,8 +3574,15 @@ _PyDict_FromKeys(PyObject *cls, PyObject *iterable, PyObject *value)
         goto Fail;
     }
 
+    Py_ssize_t hint = PyObject_LengthHint(iterable, 0);
+    if (hint < 0) {
+        PyErr_Clear();  /* advisory only; just grow on demand instead */
+        hint = 0;
+    }
+
     if (PyDict_CheckExact(d)) {
         int status = 0;
+        int first = 1;
 
         Py_BEGIN_CRITICAL_SECTION(d);
         while (1) {
@@ -3564,6 +3590,14 @@ _PyDict_FromKeys(PyObject *cls, PyObject *iterable, PyObject *value)
             status = PyIter_NextItem(it, &key);
             if (status <= 0) {
                 break;
+            }
+            if (first) {
+                first = 0;
+                status = fromkeys_presize((PyDictObject *)d, hint, key);
+                if (status < 0) {
+                    Py_DECREF(key);
+                    break;
+                }
             }
 
             status = setitem_lock_held((PyDictObject *)d, key, value);
@@ -3579,6 +3613,8 @@ _PyDict_FromKeys(PyObject *cls, PyObject *iterable, PyObject *value)
         }
     }
     else if (PyFrozenDict_Check(d)) {
+        int first = 1;
+
         while (1) {
             PyObject *key;
             int status = PyIter_NextItem(it, &key);
@@ -3587,6 +3623,13 @@ _PyDict_FromKeys(PyObject *cls, PyObject *iterable, PyObject *value)
             }
             if (status == 0) {
                 break;
+            }
+            if (first) {
+                first = 0;
+                if (fromkeys_presize((PyDictObject *)d, hint, key) < 0) {
+                    Py_DECREF(key);
+                    goto Fail;
+                }
             }
 
             // setitem_take2_lock_held consumes a reference to key
