@@ -1764,7 +1764,8 @@ array_array_tofile_impl(arrayobject *self, PyTypeObject *cls, PyObject *f)
     /* Write 64K blocks at a time */
     /* XXX Make the block size settable */
     int BLOCKSIZE = 64*1024;
-    Py_ssize_t nblocks = (nbytes + BLOCKSIZE - 1) / BLOCKSIZE;
+    Py_ssize_t blockitems = Py_MAX(BLOCKSIZE / self->ob_descr->itemsize, 1);
+    Py_ssize_t nblocks = (Py_SIZE(self) + blockitems - 1) / blockitems;
     Py_ssize_t i;
 
     if (Py_SIZE(self) == 0)
@@ -1774,22 +1775,48 @@ array_array_tofile_impl(arrayobject *self, PyTypeObject *cls, PyObject *f)
     array_state *state = get_array_state_by_class(cls);
     assert(state != NULL);
 
-    for (i = 0; i < nblocks; i++) {
-        char* ptr = self->ob_item + i*BLOCKSIZE;
-        Py_ssize_t size = BLOCKSIZE;
-        PyObject *bytes, *res;
-
-        if (i*BLOCKSIZE + size > nbytes)
-            size = nbytes - i*BLOCKSIZE;
-        bytes = PyBytes_FromStringAndSize(ptr, size);
+    if (nbytes <= BLOCKSIZE / 8) {
+        /* Small enough to fit one write, and standing up a memoryview costs
+           more than this copy below roughly 8 KiB.  A lone write cannot
+           observe a resize, so the raw pointer is safe here. */
+        PyObject *bytes = PyBytes_FromStringAndSize(self->ob_item, nbytes);
         if (bytes == NULL)
             return NULL;
-        res = PyObject_CallMethodOneArg(f, state->str_write, bytes);
+        PyObject *res = PyObject_CallMethodOneArg(f, state->str_write, bytes);
         Py_DECREF(bytes);
         if (res == NULL)
             return NULL;
+        Py_DECREF(res);
+        goto done;
+    }
+
+    /* Hold the buffer through a memoryview so that a write() which resizes
+       the array raises instead of leaving the next block reading storage that
+       has already been freed.  Slicing it also avoids copying each block into
+       a temporary bytes object. */
+    PyObject *mv = PyMemoryView_FromObject((PyObject *)self);
+    if (mv == NULL)
+        return NULL;
+
+    for (i = 0; i < nblocks; i++) {
+        Py_ssize_t start = i * blockitems;
+        Py_ssize_t stop = Py_MIN(start + blockitems, Py_SIZE(self));
+        PyObject *block, *res;
+
+        block = PySequence_GetSlice(mv, start, stop);
+        if (block == NULL) {
+            Py_DECREF(mv);
+            return NULL;
+        }
+        res = PyObject_CallMethodOneArg(f, state->str_write, block);
+        Py_DECREF(block);
+        if (res == NULL) {
+            Py_DECREF(mv);
+            return NULL;
+        }
         Py_DECREF(res); /* drop write result */
     }
+    Py_DECREF(mv);
 
   done:
     Py_RETURN_NONE;
