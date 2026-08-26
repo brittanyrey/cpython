@@ -1092,6 +1092,16 @@ PyObject *PyCodec_NameReplaceErrors(PyObject *exc)
         return NULL;
     }
 
+    // Unlike the other handlers, sizing the result up front would mean naming
+    // every character twice, and getname() dominates the cost of this one.
+    // Write into a growing buffer instead so each name is looked up once.
+    // 'end' may precede 'start'; such a range yields an empty replacement.
+    PyUnicodeWriter *writer = PyUnicodeWriter_Create(Py_MAX(end - start, 0));
+    if (writer == NULL) {
+        Py_DECREF(obj);
+        return NULL;
+    }
+
     char buffer[256]; /* NAME_MAXLEN in unicodename_db.h */
     Py_ssize_t imax = start, ressize = 0, replsize;
     for (; imax < end; ++imax) {
@@ -1100,44 +1110,48 @@ PyObject *PyCodec_NameReplaceErrors(PyObject *exc)
             // If 'c' is recognized by getname(), the corresponding replacement
             // is '\\' + 'N' + '{' + NAME + '}', i.e. 1 + 1 + 1 + len(NAME) + 1
             // characters. Failures of getname() are ignored by the handler.
-            replsize = 1 + 1 + 1 + strlen(buffer) + 1;
+            Py_ssize_t namelen = (Py_ssize_t)strlen(buffer);
+            replsize = 1 + 1 + 1 + namelen + 1;
+            if (ressize > PY_SSIZE_T_MAX - replsize) {
+                break;
+            }
+            if (PyUnicodeWriter_WriteASCII(writer, "\\N{", 3) < 0
+                || PyUnicodeWriter_WriteASCII(writer, buffer, namelen) < 0
+                || PyUnicodeWriter_WriteChar(writer, '}') < 0)
+            {
+                goto error;
+            }
         }
         else {
             replsize = codec_handler_unicode_hex_width(c);
-        }
-        if (ressize > PY_SSIZE_T_MAX - replsize) {
-            break;
+            if (ressize > PY_SSIZE_T_MAX - replsize) {
+                break;
+            }
+            // '\\' + 'U' + 8 hex digits is the widest form.
+            Py_UCS1 hex[10], *hexp = hex;
+            codec_handler_write_unicode_hex(&hexp, c);
+            assert(hexp - hex == replsize);
+            if (PyUnicodeWriter_WriteASCII(writer, (char *)hex, replsize) < 0) {
+                goto error;
+            }
         }
         ressize += replsize;
     }
 
-    PyObject *res = PyUnicode_New(ressize, 127);
+    PyObject *res = PyUnicodeWriter_Finish(writer);
     if (res == NULL) {
         Py_DECREF(obj);
         return NULL;
     }
-
-    Py_UCS1 *outp = PyUnicode_1BYTE_DATA(res);
-    for (Py_ssize_t i = start; i < imax; ++i) {
-        Py_UCS4 c = PyUnicode_READ_CHAR(obj, i);
-        if (ucnhash_capi->getname(c, buffer, sizeof(buffer), 1)) {
-            *outp++ = '\\';
-            *outp++ = 'N';
-            *outp++ = '{';
-            (void)strcpy((char *)outp, buffer);
-            outp += strlen(buffer);
-            *outp++ = '}';
-        }
-        else {
-            codec_handler_write_unicode_hex(&outp, c);
-        }
-    }
-
-    assert(outp == PyUnicode_1BYTE_DATA(res) + ressize);
-    assert(_PyUnicode_CheckConsistency(res, 1));
+    assert(PyUnicode_GET_LENGTH(res) == ressize);
     PyObject *restuple = Py_BuildValue("(Nn)", res, imax);
     Py_DECREF(obj);
     return restuple;
+
+error:
+    PyUnicodeWriter_Discard(writer);
+    Py_DECREF(obj);
+    return NULL;
 }
 
 
