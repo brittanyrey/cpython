@@ -18,6 +18,11 @@ module instead.
 
 #include <stddef.h>               // offsetof()
 #include <stdbool.h>
+#include <stdint.h>               // uint64_t
+
+/* dialect->special_ascii holds one bit per ASCII code point. */
+#define SPECIAL_ASCII       128
+#define SPECIAL_BITS_PER_WORD  64
 
 /*[clinic input]
 module _csv
@@ -116,7 +121,12 @@ typedef struct {
     Py_UCS4 delimiter;          /* field separator */
     Py_UCS4 quotechar;          /* quote character */
     Py_UCS4 escapechar;         /* escape character */
+    /* Largest non-ASCII special character, 0 when they are all ASCII. */
+    Py_UCS4 special_nonascii_max;
     PyObject *lineterminator;   /* string to write between records */
+
+    /* One bit per ASCII character the reader has to stop at. */
+    uint64_t special_ascii[SPECIAL_ASCII / SPECIAL_BITS_PER_WORD];
 
 } DialectObj;
 
@@ -372,6 +382,33 @@ dialect_check_chars(const char *name1, const char *name2, Py_UCS4 c1, Py_UCS4 c2
     return 0;
 }
 
+/* Record the characters that make parse_process_char() do something other
+   than append to the current field.  A dialect never changes after
+   construction, so this runs once.  Keep in sync with the IN_FIELD and
+   IN_QUOTED_FIELD cases of parse_process_char(). */
+static void
+dialect_set_special(DialectObj *self)
+{
+    Py_UCS4 special[] = { '\n', '\r', self->delimiter,
+                          self->quotechar, self->escapechar };
+
+    memset(self->special_ascii, 0, sizeof(self->special_ascii));
+    self->special_nonascii_max = 0;
+    for (size_t i = 0; i < Py_ARRAY_LENGTH(special); i++) {
+        Py_UCS4 c = special[i];
+        if (c == NOT_SET) {
+            continue;
+        }
+        if (c < SPECIAL_ASCII) {
+            self->special_ascii[c / SPECIAL_BITS_PER_WORD] |=
+                (uint64_t)1 << (c % SPECIAL_BITS_PER_WORD);
+        }
+        else if (c > self->special_nonascii_max) {
+            self->special_nonascii_max = c;
+        }
+    }
+}
+
 #define D_OFF(x) offsetof(DialectObj, x)
 
 static struct PyMemberDef Dialect_memberlist[] = {
@@ -559,6 +596,8 @@ dialect_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         goto err;
     }
 
+    dialect_set_special(self);
+
     ret = Py_NewRef(self);
 err:
     Py_CLEAR(self);
@@ -735,6 +774,30 @@ parse_grow_buff(ReaderObj *self)
     return 1;
 }
 
+/* Only for dialects with a non-ASCII delimiter, quote or escape character.
+   NOT_SET is not a code point, so an unset one never matches.  Out of line
+   to keep the test below small. */
+Py_NO_INLINE static int
+dialect_is_special_nonascii(DialectObj *dialect, Py_UCS4 c)
+{
+    return c <= dialect->special_nonascii_max &&
+           (c == dialect->delimiter ||
+            c == dialect->quotechar ||
+            c == dialect->escapechar);
+}
+
+/* False only if c is an ordinary character: one that both IN_FIELD and
+   IN_QUOTED_FIELD append to the field verbatim, leaving the state alone. */
+static inline int
+dialect_is_special(DialectObj *dialect, Py_UCS4 c)
+{
+    if (c < SPECIAL_ASCII) {
+        uint64_t word = dialect->special_ascii[c / SPECIAL_BITS_PER_WORD];
+        return (word >> (c % SPECIAL_BITS_PER_WORD)) & 1;
+    }
+    return dialect_is_special_nonascii(dialect, c);
+}
+
 static int
 parse_add_char(ReaderObj *self, _csvstate *module_state, Py_UCS4 c)
 {
@@ -751,6 +814,8 @@ parse_add_char(ReaderObj *self, _csvstate *module_state, Py_UCS4 c)
     return 0;
 }
 
+/* Feed one character to the state machine.  Returns -1 on error, or 1 when c
+   extends a field that already held a character: a run worth copying. */
 static int
 parse_process_char(ReaderObj *self, _csvstate *module_state, Py_UCS4 c)
 {
@@ -824,7 +889,7 @@ parse_process_char(ReaderObj *self, _csvstate *module_state, Py_UCS4 c)
         _Py_FALLTHROUGH;
 
     case IN_FIELD:
-        /* in unquoted field */
+        /* in unquoted field.  See dialect_set_special(). */
         if (c == '\n' || c == '\r' || c == EOL) {
             /* end of line - return [fields] */
             if (parse_save_field(self) < 0)
@@ -845,11 +910,12 @@ parse_process_char(ReaderObj *self, _csvstate *module_state, Py_UCS4 c)
             /* normal character - save in field */
             if (parse_add_char(self, module_state, c) < 0)
                 return -1;
+            return self->field_len > 1;
         }
         break;
 
     case IN_QUOTED_FIELD:
-        /* in quoted field */
+        /* in quoted field.  See dialect_set_special(). */
         if (c == EOL)
             ;
         else if (c == dialect->escapechar) {
@@ -871,6 +937,7 @@ parse_process_char(ReaderObj *self, _csvstate *module_state, Py_UCS4 c)
             /* normal character - save in field */
             if (parse_add_char(self, module_state, c) < 0)
                 return -1;
+            return self->field_len > 1;
         }
         break;
 
@@ -934,6 +1001,51 @@ parse_process_char(ReaderObj *self, _csvstate *module_state, Py_UCS4 c)
     return 0;
 }
 
+/* One of these per string kind, so that a line is read through a typed
+   pointer and the kind is not tested per character.  Returns -1 on error. */
+#define PARSE_LINE(name, type) \
+static int \
+name(ReaderObj *self, _csvstate *module_state, const type *src, \
+     Py_ssize_t linelen, Py_ssize_t field_limit) \
+{ \
+    DialectObj *dialect = self->dialect; \
+    Py_ssize_t pos = 0; \
+ \
+    while (pos < linelen) { \
+        int in_run = parse_process_char(self, module_state, src[pos]); \
+        pos++; \
+        if (in_run != 0) { \
+            if (in_run < 0) { \
+                return -1; \
+            } \
+            /* Test the next character before working out how much room \
+               there is, so a field ending here costs one test. */ \
+            if (pos < linelen && !dialect_is_special(dialect, src[pos])) { \
+                Py_UCS4 *out = self->field + self->field_len; \
+                Py_ssize_t room = Py_MIN(self->field_size, field_limit) \
+                                  - self->field_len; \
+                Py_ssize_t avail = Py_MIN(linelen - pos, room); \
+                Py_ssize_t n = 0; \
+ \
+                /* Stops short of a full buffer; the state machine grows it. */ \
+                while (n < avail \
+                       && !dialect_is_special(dialect, src[pos + n])) { \
+                    out[n] = src[pos + n]; \
+                    n++; \
+                } \
+                self->field_len += n; \
+                pos += n; \
+            } \
+        } \
+    } \
+    return 0; \
+}
+
+PARSE_LINE(parse_line_ucs1, Py_UCS1)
+PARSE_LINE(parse_line_ucs2, Py_UCS2)
+PARSE_LINE(parse_line_ucs4, Py_UCS4)
+#undef PARSE_LINE
+
 static int
 parse_reset(ReaderObj *self)
 {
@@ -952,9 +1064,8 @@ Reader_iternext_lock_held(PyObject *op)
     ReaderObj *self = _ReaderObj_CAST(op);
 
     PyObject *fields = NULL;
-    Py_UCS4 c;
-    Py_ssize_t pos, linelen;
-    int kind;
+    Py_ssize_t linelen, field_limit;
+    int kind, res;
     const void *data;
     PyObject *lineobj;
 
@@ -999,17 +1110,26 @@ Reader_iternext_lock_held(PyObject *op)
         ++self->line_num;
         kind = PyUnicode_KIND(lineobj);
         data = PyUnicode_DATA(lineobj);
-        pos = 0;
         linelen = PyUnicode_GET_LENGTH(lineobj);
-        while (linelen--) {
-            c = PyUnicode_READ(kind, data, pos);
-            if (parse_process_char(self, module_state, c) < 0) {
-                Py_DECREF(lineobj);
-                goto err;
-            }
-            pos++;
+        field_limit = FT_ATOMIC_LOAD_SSIZE_RELAXED(module_state->field_limit);
+        switch (kind) {
+        case PyUnicode_1BYTE_KIND:
+            res = parse_line_ucs1(self, module_state, data, linelen,
+                                  field_limit);
+            break;
+        case PyUnicode_2BYTE_KIND:
+            res = parse_line_ucs2(self, module_state, data, linelen,
+                                  field_limit);
+            break;
+        default:
+            assert(kind == PyUnicode_4BYTE_KIND);
+            res = parse_line_ucs4(self, module_state, data, linelen,
+                                  field_limit);
+            break;
         }
         Py_DECREF(lineobj);
+        if (res < 0)
+            goto err;
         if (parse_process_char(self, module_state, EOL) < 0)
             goto err;
     } while (self->state != START_RECORD);

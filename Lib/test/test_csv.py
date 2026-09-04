@@ -424,6 +424,15 @@ class Test_Csv(unittest.TestCase):
         self._read_test(['a,\\b,c'], [['a', '\\b', 'c']], escapechar=None)
         self._read_test(['a,\\b,c'], [['a', '\\b', 'c']])
 
+    def test_read_non_ascii(self):
+        self._read_test(['é,b'], [['é', 'b']])
+        self._read_test(['αλβλγ'], [['α', 'β', 'γ']], delimiter='λ')
+        self._read_test(['αλωλγ'], [['α', 'ω', 'γ']], delimiter='λ')
+        self._read_test(['θα,βθ,γ'], [['α,β', 'γ']], quotechar='θ')
+        self._read_test(['α,μ,β'], [['α', ',β']], escapechar='μ')
+        self._read_test(['a\U0001F600b'], [['a', 'b']], delimiter='\U0001F600')
+        self._read_test(['\U0001F600,b'], [['\U0001F600', 'b']])
+
     def test_read_quoting(self):
         self._read_test(['1,",3,",5'], [['1', ',3,', '5']])
         self._read_test(['1,",3,",5'], [['1', '"', '3', '"', '5']],
