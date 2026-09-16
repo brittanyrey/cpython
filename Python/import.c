@@ -4422,6 +4422,30 @@ done:
     return ret;
 }
 
+// Add a lazily imported name to sys.lazy_modules (PEP 810).
+//
+// Names only leave the set again through _imp._set_lazy_attributes(), which
+// the import machinery calls when it actually loads a module.  A name whose
+// module is already in sys.modules never reaches that path -- reification
+// hands back the existing module -- so recording it would leave a stale entry
+// behind forever.  Skip those names instead.
+static int
+lazy_modules_add(PyThreadState *tstate, PyObject *name)
+{
+    PyObject *modules = get_modules_dict(tstate, false);
+    if (modules == NULL) {
+        return -1;
+    }
+    int loaded = PyDict_Contains(modules, name);
+    if (loaded < 0) {
+        return -1;
+    }
+    if (loaded) {
+        return 0;
+    }
+    return PySet_Add(LAZY_MODULES(tstate->interp), name);
+}
+
 static int
 register_from_lazy_on_parent(PyThreadState *tstate, PyObject *abs_name,
                              PyObject *from)
@@ -4431,9 +4455,7 @@ register_from_lazy_on_parent(PyThreadState *tstate, PyObject *abs_name,
         return -1;
     }
 
-    // Add the module name to sys.lazy_modules set (PEP 810).
-    PyObject *lazy_modules = LAZY_MODULES(tstate->interp);
-    if (PySet_Add(lazy_modules, fromname) < 0) {
+    if (lazy_modules_add(tstate, fromname) < 0) {
         Py_DECREF(fromname);
         return -1;
     }
@@ -4607,9 +4629,7 @@ _PyImport_LazyImportModuleLevelObject(PyThreadState *tstate,
         return NULL;
     }
 
-    // Add the module name to sys.lazy_modules set (PEP 810).
-    PyObject *lazy_modules = LAZY_MODULES(tstate->interp);
-    if (PySet_Add(lazy_modules, abs_name) < 0) {
+    if (lazy_modules_add(tstate, abs_name) < 0) {
         goto error;
     }
 

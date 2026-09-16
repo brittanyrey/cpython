@@ -53,7 +53,8 @@ class LazyImportTests(LazyImportTestCase):
             self.fail('lazy import failed')
 
         self.assertFalse("test.test_lazy_import.data.basic2" in sys.modules)
-        self.assertIn("test.test_lazy_import.data", sys.lazy_modules)
+        # The package is already loaded, so it is not a pending import.
+        self.assertNotIn("test.test_lazy_import.data", sys.lazy_modules)
         self.assertIn("test.test_lazy_import.data.basic2", sys.lazy_modules)
         test.test_lazy_import.data.basic_from_unused.basic2
         self.assertNotIn("test.test_import.data", sys.lazy_modules)
@@ -1247,6 +1248,68 @@ class SysLazyModulesTrackingTests(LazyImportTestCase):
             lazy import json
             assert "json" in sys.lazy_modules, (
                 f"expected 'json' in sys.lazy_modules, got {set(sys.lazy_modules)}"
+            )
+            print("OK")
+        """)
+        assert_python_ok("-c", code)
+
+    def test_already_loaded_module_is_not_tracked(self):
+        """A lazy import of a loaded module should not be tracked.
+
+        Reification hands back the existing module without going through
+        the import machinery, so such a name would never be removed again.
+        """
+        code = textwrap.dedent("""
+            import sys
+
+            # Loaded by a regular import.
+            import json
+            lazy import json as lazy_json
+            assert "json" not in sys.lazy_modules, (
+                f"expected 'json' not in sys.lazy_modules, got {sys.lazy_modules}"
+            )
+
+            # Loaded by reifying an earlier lazy import.
+            lazy import base64
+            base64.b64encode
+            lazy import base64 as lazy_base64
+            assert "base64" not in sys.lazy_modules, (
+                f"expected 'base64' not in sys.lazy_modules, got {sys.lazy_modules}"
+            )
+            print("OK")
+        """)
+        assert_python_ok("-c", code)
+
+    def test_already_loaded_submodule_is_not_tracked(self):
+        """`lazy from` a loaded submodule should not be tracked either."""
+        code = textwrap.dedent("""
+            import sys
+            import http.client
+            lazy from http import client
+            assert "http.client" not in sys.lazy_modules, (
+                f"expected 'http.client' untracked, got {sys.lazy_modules}"
+            )
+            print("OK")
+        """)
+        assert_python_ok("-c", code)
+
+    def test_pending_submodule_is_still_tracked(self):
+        """`lazy from` an unloaded submodule must stay tracked.
+
+        Importing the package does not import the submodule, so the
+        submodule is still an import that can fire and has to be listed.
+        """
+        code = textwrap.dedent("""
+            import sys
+            lazy from http import client
+            assert "http.client" in sys.lazy_modules, (
+                f"expected 'http.client' tracked, got {sys.lazy_modules}"
+            )
+            import http
+            assert "http.client" not in sys.modules
+            assert "http.client" in sys.lazy_modules, (
+                f"loading the package must not untrack the submodule, "
+                f"got {sys.lazy_modules}"
             )
             print("OK")
         """)

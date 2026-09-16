@@ -1,0 +1,4 @@
+A lazy import of a module that is already loaded is no longer recorded in
+:data:`sys.lazy_modules`.  Such names were never removed again, because
+reification returns the existing module without going through the import
+machinery, so they accumulated as stale entries.
