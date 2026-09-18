@@ -45,7 +45,8 @@ typedef enum {
     _Py_LAZY_SUBMODULE_LOADED = 1,
 } _PyLazySubmoduleImportResult;
 extern _PyLazySubmoduleImportResult _PyImport_TryLoadLazySubmodule(
-    PyObject *mod_name, PyObject *attr_name, PyObject **result);
+    PyObject *parent, PyObject *mod_name, PyObject *attr_name,
+    PyObject **result);
 extern PyObject * _PyImport_LazyImportModuleLevelObject(
     PyThreadState *tstate, PyObject *name, PyObject *builtins,
     PyObject *globals, PyObject *locals, PyObject *fromlist, int level);

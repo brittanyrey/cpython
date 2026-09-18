@@ -4443,15 +4443,21 @@ register_from_lazy_on_parent(PyThreadState *tstate, PyObject *abs_name,
     return res;
 }
 
+// Reify the lazy submodule 'mod_name.attr_name' and bind it on the module
+// 'parent'.  The binding is stored before 'attr_name' is dropped from the set
+// of pending submodules, and names are only ever added to 'lazy_pending', so a
+// thread that misses the attribute in the module dict and then finds no
+// pending entry can tell that another thread has just bound it.
 _PyLazySubmoduleImportResult
-_PyImport_TryLoadLazySubmodule(PyObject *mod_name, PyObject *attr_name,
-                               PyObject **result)
+_PyImport_TryLoadLazySubmodule(PyObject *parent, PyObject *mod_name,
+                               PyObject *attr_name, PyObject **result)
 {
     assert(result != NULL);
     *result = NULL;
 
     PyThreadState *tstate = _PyThreadState_GET();
     PyInterpreterState *interp = tstate->interp;
+    PyObject *parent_dict = _PyModule_GetDict(parent);
     PyObject *lazy_pending = LAZY_PENDING_SUBMODULES(interp);
     if (lazy_pending == NULL) {
         return _Py_LAZY_SUBMODULE_NOT_FOUND;
@@ -4473,7 +4479,21 @@ _PyImport_TryLoadLazySubmodule(PyObject *mod_name, PyObject *attr_name,
     }
     if (contains == 0) {
         Py_DECREF(pending_set);
-        return _Py_LAZY_SUBMODULE_NOT_FOUND;
+        // Another thread may have reified 'attr_name' and dropped it from
+        // 'pending_set' since our caller looked in the module dict.
+        rc = PyDict_GetItemRef(parent_dict, attr_name, result);
+        if (rc < 0) {
+            return _Py_LAZY_SUBMODULE_ERROR;
+        }
+        if (rc == 0) {
+            return _Py_LAZY_SUBMODULE_NOT_FOUND;
+        }
+        if (PyLazyImport_CheckExact(*result)) {
+            // 'parent' is binding its own lazy import of this name.
+            Py_CLEAR(*result);
+            return _Py_LAZY_SUBMODULE_NOT_FOUND;
+        }
+        return _Py_LAZY_SUBMODULE_LOADED;
     }
 
     PyObject *full_name = PyUnicode_FromFormat("%U.%U", mod_name, attr_name);
@@ -4497,6 +4517,12 @@ _PyImport_TryLoadLazySubmodule(PyObject *mod_name, PyObject *attr_name,
         return _Py_LAZY_SUBMODULE_NOT_FOUND;
     }
 
+    if (PyDict_SetItem(parent_dict, attr_name, mod) < 0) {
+        Py_DECREF(mod);
+        Py_DECREF(pending_set);
+        Py_DECREF(full_name);
+        return _Py_LAZY_SUBMODULE_ERROR;
+    }
     if (PySet_Discard(pending_set, attr_name) < 0) {
         Py_DECREF(mod);
         Py_DECREF(pending_set);

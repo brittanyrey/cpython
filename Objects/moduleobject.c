@@ -1313,17 +1313,15 @@ try_load_lazy_submodule(PyModuleObject *m, PyObject *name)
     }
     PyObject *result = NULL;
     _PyLazySubmoduleImportResult status =
-        _PyImport_TryLoadLazySubmodule(mod_name, name, &result);
+        _PyImport_TryLoadLazySubmodule((PyObject *)m, mod_name, name, &result);
     Py_DECREF(mod_name);
     if (status != _Py_LAZY_SUBMODULE_LOADED) {
         assert(status == _Py_LAZY_SUBMODULE_ERROR ||
                status == _Py_LAZY_SUBMODULE_NOT_FOUND);
+        assert(result == NULL);
         return NULL;
     }
-    if (PyDict_SetItem(m->md_dict, name, result) < 0) {
-        Py_DECREF(result);
-        return NULL;
-    }
+    // _PyImport_TryLoadLazySubmodule() has bound the submodule in md_dict.
     return result;
 }
 

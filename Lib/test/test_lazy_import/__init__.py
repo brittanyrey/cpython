@@ -13,6 +13,7 @@ import os
 import contextlib
 
 from test import support
+from test.support import threading_helper
 from test.support.script_helper import assert_python_ok
 
 try:
@@ -26,12 +27,15 @@ class LazyImportTestCase(unittest.TestCase):
         self.lazy_imports_filter = sys.get_lazy_imports_filter()
         self.lazy_imports = sys.get_lazy_imports()
 
-    def tearDown(self):
-        """Clean up any test modules from sys.modules."""
+    def unload_data_modules(self):
+        """Remove the test data package and its submodules from sys.modules."""
         for key in list(sys.modules.keys()):
             if key.startswith('test.test_lazy_import.data'):
                 del sys.modules[key]
 
+    def tearDown(self):
+        """Clean up any test modules from sys.modules."""
+        self.unload_data_modules()
         sys.set_lazy_imports_filter(self.lazy_imports_filter)
         sys.set_lazy_imports(self.lazy_imports)
         sys.lazy_modules.clear()
@@ -1875,6 +1879,27 @@ class ThreadSafetyTests(LazyImportTestCase):
         first_module = results[0]
         for r in results[1:]:
             self.assertIs(r, first_module)
+
+    def test_concurrent_lazy_submodule_attribute(self):
+        """Threads racing on a pending lazy submodule attribute all get it."""
+        pkg = 'test.test_lazy_import.data'
+        num_threads = 4
+        for _ in range(10):
+            self.unload_data_modules()
+            # Registers 'basic2' as a lazy submodule of 'data'.
+            import test.test_lazy_import.data.basic_unused
+            data = sys.modules[pkg]
+            # Leave 'basic2' in sys.modules but unbound on 'data', so every
+            # thread misses it in data.__dict__ and races to reify it.
+            import test.test_lazy_import.data.basic2
+            del data.basic2
+
+            results = []
+            threading_helper.run_concurrently(
+                lambda: results.append(data.basic2), num_threads)
+
+            basic2 = sys.modules[f'{pkg}.basic2']
+            self.assertEqual(results, [basic2] * num_threads)
 
     def test_concurrent_reification_multiple_modules(self):
         """Multiple threads reifying different lazy imports concurrently."""
