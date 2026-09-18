@@ -3360,6 +3360,10 @@ _PyEval_LazyImportFrom(PyThreadState *tstate, _PyInterpreterFrame *frame, PyObje
             if (from == NULL) {
                 return NULL;
             }
+            if (_PyImport_UnmarkPendingSubmodule(tstate, from, name) < 0) {
+                Py_DECREF(from);
+                return NULL;
+            }
             ret = _PyLazyImport_New(frame, d->lz_builtins, from, name);
             Py_DECREF(from);
             return ret;
@@ -3372,6 +3376,16 @@ _PyEval_LazyImportFrom(PyThreadState *tstate, _PyInterpreterFrame *frame, PyObje
         if (dot >= 0) {
             PyObject *from = PyUnicode_Substring(d->lz_from, 0, dot);
             if (from == NULL) {
+                return NULL;
+            }
+            // Only the last component of the dotted name is in doubt; the
+            // ones above it must be packages for it to be reached at all.
+            int last = PyUnicode_GET_LENGTH(d->lz_from)
+                       == dot + 1 + PyUnicode_GET_LENGTH(name);
+            if (last &&
+                _PyImport_UnmarkPendingSubmodule(tstate, from, name) < 0)
+            {
+                Py_DECREF(from);
                 return NULL;
             }
             ret = _PyLazyImport_New(frame, d->lz_builtins, from, name);

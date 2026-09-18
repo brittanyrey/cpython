@@ -1,0 +1,2 @@
+import test.test_lazy_import.data.submodule_name_shadowed
+lazy import test.test_lazy_import.data.submodule_name_shadowed.sub

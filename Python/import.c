@@ -4338,7 +4338,9 @@ PyImport_ImportModuleLevelObject(PyObject *name, PyObject *globals,
     return final_mod;
 }
 
-// ensure we have the set for the parent module name in sys.lazy_modules.
+// ensure we have the dict for the parent module name in
+// lazy_pending_submodules.  It maps each pending child name to whether that
+// name is known to be a submodule rather than a possible attribute.
 // Returns a new reference.
 static PyObject *
 ensure_lazy_pending_submodules(PyDictObject *lazy_modules, PyObject *parent)
@@ -4349,7 +4351,7 @@ ensure_lazy_pending_submodules(PyDictObject *lazy_modules, PyObject *parent)
                                                   &lazy_submodules);
     if (err == 0) {
         // value isn't present
-        lazy_submodules = PySet_New(NULL);
+        lazy_submodules = PyDict_New();
         if (lazy_submodules != NULL &&
             _PyDict_SetItem_LockHeld(lazy_modules, parent,
                                      lazy_submodules) < 0) {
@@ -4360,12 +4362,70 @@ ensure_lazy_pending_submodules(PyDictObject *lazy_modules, PyObject *parent)
     return lazy_submodules;
 }
 
+// `import a.b as x` binds whatever 'b' names, which unlike `import a.b` may
+// be an attribute rather than a submodule.  IMPORT_FROM runs before anything
+// resolves, so it can still retract the claim registration made.
+int
+_PyImport_UnmarkPendingSubmodule(PyThreadState *tstate, PyObject *parent,
+                                 PyObject *child)
+{
+    PyObject *pending;
+    int rc = PyDict_GetItemRef(LAZY_PENDING_SUBMODULES(tstate->interp),
+                               parent, &pending);
+    if (rc <= 0) {
+        return rc;
+    }
+    rc = PyDict_Contains(pending, child);
+    if (rc > 0) {
+        rc = PyDict_SetItem(pending, child, Py_False);
+    }
+    Py_DECREF(pending);
+    return rc < 0 ? -1 : 0;
+}
+
+// Bind 'child' on a loaded parent as a lazy import of the submodule, the way
+// an eager `import parent.child` binds the submodule itself.  Only a name the
+// parent already binds needs this; otherwise the pending-submodule fallback
+// in _Py_module_getattro_impl imports it on the first failed lookup.
+static int
+bind_lazy_submodule(PyThreadState *tstate, PyObject *mod, PyObject *parent,
+                    PyObject *child)
+{
+    if (!PyModule_Check(mod)) {
+        return 0;
+    }
+    PyObject *dict = PyModule_GetDict(mod);
+    PyObject *shadowing;
+    int rc = PyDict_GetItemRef(dict, child, &shadowing);
+    if (rc <= 0) {
+        return rc;
+    }
+    // Leave alone a submodule already bound, and a lazy import of one that
+    // the parent established itself.
+    rc = PyModule_Check(shadowing) || PyLazyImport_CheckExact(shadowing);
+    Py_DECREF(shadowing);
+    if (rc) {
+        return 0;
+    }
+
+    PyObject *lazy = _PyLazyImport_New(NULL, tstate->interp->builtins,
+                                       parent, child);
+    if (lazy == NULL) {
+        return -1;
+    }
+    rc = PyDict_SetItem(dict, child, lazy);
+    Py_DECREF(lazy);
+    return rc;
+}
+
 // Records all parent-child relationships in lazy_pending_submodules
 // for a lazily imported module name. When a parent module's attribute
 // is accessed, _Py_module_getattro_impl will check lazy_pending_submodules
-// and trigger the import.
+// and trigger the import.  'is_submodule' says whether the final name is
+// known to be a submodule; every name above it always is.
 static int
-register_lazy_on_parent(PyThreadState *tstate, PyObject *name)
+register_lazy_on_parent(PyThreadState *tstate, PyObject *name,
+                        int is_submodule)
 {
     int ret = -1;
     PyObject *parent = NULL;
@@ -4374,6 +4434,10 @@ register_lazy_on_parent(PyThreadState *tstate, PyObject *name)
     PyInterpreterState *interp = tstate->interp;
     PyObject *lazy_pending_submodules = LAZY_PENDING_SUBMODULES(interp);
     assert(lazy_pending_submodules != NULL);
+    PyObject *modules = get_modules_dict(tstate, false);
+    if (modules == NULL) {
+        return -1;
+    }
 
     Py_INCREF(name);
     while (true) {
@@ -4404,13 +4468,28 @@ register_lazy_on_parent(PyThreadState *tstate, PyObject *name)
         if (lazy_submodules == NULL) {
             goto done;
         }
-
-        if (PySet_Add(lazy_submodules, child) < 0) {
-            Py_DECREF(lazy_submodules);
+        int err = is_submodule
+            ? PyDict_SetItem(lazy_submodules, child, Py_True)
+            : PyDict_SetDefaultRef(lazy_submodules, child, Py_False, NULL);
+        Py_DECREF(lazy_submodules);
+        if (err < 0) {
             goto done;
         }
-        Py_DECREF(lazy_submodules);
 
+        // Nothing else will bind the submodule on an already loaded parent.
+        PyObject *mod = NULL;
+        if (is_submodule && PyDict_GetItemRef(modules, parent, &mod) < 0) {
+            goto done;
+        }
+        if (mod != NULL) {
+            err = bind_lazy_submodule(tstate, mod, parent, child);
+            Py_DECREF(mod);
+            if (err < 0) {
+                goto done;
+            }
+        }
+
+        is_submodule = 1;
         Py_SETREF(name, parent);
         parent = NULL;
     }
@@ -4438,7 +4517,7 @@ register_from_lazy_on_parent(PyThreadState *tstate, PyObject *abs_name,
         return -1;
     }
 
-    int res = register_lazy_on_parent(tstate, fromname);
+    int res = register_lazy_on_parent(tstate, fromname, 0);
     Py_DECREF(fromname);
     return res;
 }
@@ -4466,7 +4545,7 @@ _PyImport_TryLoadLazySubmodule(PyObject *mod_name, PyObject *attr_name,
         return _Py_LAZY_SUBMODULE_NOT_FOUND;
     }
 
-    int contains = PySet_Contains(pending_set, attr_name);
+    int contains = PyDict_Contains(pending_set, attr_name);
     if (contains < 0) {
         Py_DECREF(pending_set);
         return _Py_LAZY_SUBMODULE_ERROR;
@@ -4497,7 +4576,7 @@ _PyImport_TryLoadLazySubmodule(PyObject *mod_name, PyObject *attr_name,
         return _Py_LAZY_SUBMODULE_NOT_FOUND;
     }
 
-    if (PySet_Discard(pending_set, attr_name) < 0) {
+    if (PyDict_Pop(pending_set, attr_name, NULL) < 0) {
         Py_DECREF(mod);
         Py_DECREF(pending_set);
         Py_DECREF(full_name);
@@ -4622,7 +4701,7 @@ _PyImport_LazyImportModuleLevelObject(PyThreadState *tstate,
             }
         }
     }
-    else if (register_lazy_on_parent(tstate, abs_name) < 0) {
+    else if (register_lazy_on_parent(tstate, abs_name, 1) < 0) {
         goto error;
     }
 
@@ -5648,11 +5727,34 @@ _imp__set_lazy_attributes_impl(PyObject *module, PyObject *modobj,
                                PyObject *name)
 /*[clinic end generated code: output=3369bb3242b1f043 input=38ea6f30956dd7d6]*/
 {
-    PyInterpreterState *interp = _PyInterpreterState_GET();
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyInterpreterState *interp = tstate->interp;
     if (PySet_Discard(LAZY_MODULES(interp), name) < 0) {
         return NULL;
     }
-    Py_RETURN_NONE;
+
+    PyObject *pending;
+    int rc = PyDict_GetItemRef(LAZY_PENDING_SUBMODULES(interp), name,
+                               &pending);
+    if (rc <= 0) {
+        return rc < 0 ? NULL : Py_NewRef(Py_None);
+    }
+    // Snapshot: binding a submodule can add pending names.
+    PyObject *children = PyDict_Items(pending);
+    Py_DECREF(pending);
+    if (children == NULL) {
+        return NULL;
+    }
+    int err = 0;
+    for (Py_ssize_t i = 0; !err && i < PyList_GET_SIZE(children); i++) {
+        PyObject *item = PyList_GET_ITEM(children, i);
+        if (PyTuple_GET_ITEM(item, 1) == Py_True) {
+            err = bind_lazy_submodule(tstate, modobj, name,
+                                      PyTuple_GET_ITEM(item, 0));
+        }
+    }
+    Py_DECREF(children);
+    return err < 0 ? NULL : Py_NewRef(Py_None);
 }
 
 PyDoc_STRVAR(doc_imp,
