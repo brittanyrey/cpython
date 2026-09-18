@@ -49,6 +49,8 @@ extern _PyLazySubmoduleImportResult _PyImport_TryLoadLazySubmodule(
 extern PyObject * _PyImport_LazyImportModuleLevelObject(
     PyThreadState *tstate, PyObject *name, PyObject *builtins,
     PyObject *globals, PyObject *locals, PyObject *fromlist, int level);
+extern int _PyImport_UnmarkPendingSubmodule(
+    PyThreadState *tstate, PyObject *parent, PyObject *child);
 
 
 #ifdef HAVE_DLOPEN

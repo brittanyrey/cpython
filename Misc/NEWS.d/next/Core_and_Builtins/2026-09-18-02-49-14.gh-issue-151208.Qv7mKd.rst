@@ -1,0 +1,4 @@
+Fix a lazy ``import pkg.sub`` never importing the submodule when
+``pkg/__init__.py`` binds its own attribute of that name.  The attribute
+answered the read that was meant to trigger the import, where an eager
+``import pkg.sub`` replaces it with the submodule.

@@ -2,6 +2,7 @@
 
 import io
 import dis
+import importlib
 import subprocess
 import sys
 import textwrap
@@ -2208,6 +2209,28 @@ class ModuleVariableNameCollisionTests(unittest.TestCase):
             "test.test_lazy_import.data.module_same_name_var_order2.bar"
         ]
         self.assertIs(module_same_name_var_order2.bar, bar_mod)
+
+    # gh-151208: `import pkg.sub` imports the submodule even when the package
+    # binds its own `sub`, as the eager import does.
+    def check_shadowed_submodule(self, driver):
+        mod = importlib.import_module(f"test.test_lazy_import.data.{driver}")
+        pkg = mod.test.test_lazy_import.data.submodule_name_shadowed
+        self.assertIsInstance(pkg.sub, types.ModuleType)
+        self.assertIs(pkg.sub, sys.modules[
+            "test.test_lazy_import.data.submodule_name_shadowed.sub"
+        ])
+
+    def test_shadowed_submodule_then_parent_import(self):
+        """A later `import pkg` should not lose a pending `import pkg.sub`."""
+        self.check_shadowed_submodule("import_parent_after_submodule")
+
+    def test_shadowed_submodule_then_sibling_import(self):
+        """A later `import pkg.other` should not lose it either."""
+        self.check_shadowed_submodule("import_sibling_after_submodule")
+
+    def test_shadowed_submodule_of_loaded_parent(self):
+        """A pending submodule binds on a package that is already loaded."""
+        self.check_shadowed_submodule("lazy_submodule_of_loaded_parent")
 
 
 class DeletedModuleReimportTests(unittest.TestCase):
