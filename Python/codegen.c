@@ -2865,21 +2865,29 @@ codegen_try_star_except(compiler *c, stmt_ty s)
 
 static int
 codegen_try(compiler *c, stmt_ty s) {
+    int result;
+    _PyCompile_EnterTryBlock(c);
     if (s->v.Try.finalbody && asdl_seq_LEN(s->v.Try.finalbody))
-        return codegen_try_finally(c, s);
+        result = codegen_try_finally(c, s);
     else
-        return codegen_try_except(c, s);
+        result = codegen_try_except(c, s);
+    _PyCompile_LeaveTryBlock(c);
+    return result;
 }
 
 static int
 codegen_try_star(compiler *c, stmt_ty s)
 {
+    int result;
+    _PyCompile_EnterTryBlock(c);
     if (s->v.TryStar.finalbody && asdl_seq_LEN(s->v.TryStar.finalbody)) {
-        return codegen_try_star_finally(c, s);
+        result = codegen_try_star_finally(c, s);
     }
     else {
-        return codegen_try_star_except(c, s);
+        result = codegen_try_star_except(c, s);
     }
+    _PyCompile_LeaveTryBlock(c);
+    return result;
 }
 
 static int

@@ -226,6 +226,11 @@ class CompatibilityModeTests(LazyImportTestCase):
         import test.test_lazy_import.data.compatibility_mode_try_except
         self.assertIn("test.test_lazy_import.data.basic2", sys.modules)
 
+    def test_compatibility_mode_try_finally(self):
+        """Imports in try/finally should be eager even in compatibility mode."""
+        import test.test_lazy_import.data.compatibility_mode_try_finally
+        self.assertIn("test.test_lazy_import.data.basic2", sys.modules)
+
     def test_compatibility_mode_relative(self):
         """__lazy_modules__ should work with relative imports."""
         import test.test_lazy_import.data.basic_compatibility_mode_relative
@@ -381,6 +386,15 @@ class EagerImportInLazyModeTests(LazyImportTestCase):
         sys.set_lazy_imports("all")
         import test.test_lazy_import.data.try_except_eager_from
         self.assertIn("test.test_lazy_import.data.basic2", sys.modules)
+
+    def test_try_else_finally_eager(self):
+        """Imports in try/else and try/finally should be eager even with mode='all'."""
+        sys.set_lazy_imports("all")
+        for name in ("try_else_eager", "try_finally_eager", "try_star_finally_eager"):
+            with self.subTest(name):
+                sys.modules.pop("test.test_lazy_import.data.basic2", None)
+                __import__(f"test.test_lazy_import.data.{name}")
+                self.assertIn("test.test_lazy_import.data.basic2", sys.modules)
 
     def test_eager_import_func(self):
         """Imports inside functions should return modules, not proxies."""

@@ -191,6 +191,8 @@ int _PyCompile_AddDeferredAnnotation(struct _PyCompiler *c, stmt_ty s,
                                      PyObject **conditional_annotation_index);
 void _PyCompile_EnterConditionalBlock(struct _PyCompiler *c);
 void _PyCompile_LeaveConditionalBlock(struct _PyCompiler *c);
+void _PyCompile_EnterTryBlock(struct _PyCompiler *c);
+void _PyCompile_LeaveTryBlock(struct _PyCompiler *c);
 
 int _PyCodegen_AddReturnAtEnd(struct _PyCompiler *c, int addNone);
 int _PyCodegen_EnterAnonymousScope(struct _PyCompiler* c, mod_ty mod);
