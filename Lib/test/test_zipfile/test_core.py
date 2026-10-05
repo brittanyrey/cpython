@@ -26,7 +26,7 @@ from test.support import script_helper
 from test.support import (
     findfile, requires_zlib, requires_bz2, requires_lzma,
     requires_zstd, captured_stdout, captured_stderr, requires_subprocess,
-    cpython_only, gc_collect
+    cpython_only, gc_collect, catch_unraisable_exception
 )
 from test.support.os_helper import (
     TESTFN, unlink, rmtree, temp_dir, temp_cwd, fd_count, FakePath,
@@ -4094,6 +4094,29 @@ class OtherTests(unittest.TestCase):
             zf.writestr("f.txt", b"data")
             zf.close()
             del zf
+
+    def test_garbage_collection_closes_when_warning_fails(self):
+        buf = io.BytesIO()
+        zf = zipfile.ZipFile(buf, "w")
+        zf.writestr("f.txt", b"data")
+        with warnings.catch_warnings(), catch_unraisable_exception() as cm:
+            warnings.simplefilter("error", ResourceWarning)
+            del zf
+            gc_collect()
+            self.assertIsInstance(cm.unraisable.exc_value, ResourceWarning)
+        with zipfile.ZipFile(buf) as zf:
+            self.assertEqual(zf.namelist(), ["f.txt"])
+
+    @requires_subprocess()
+    def test_unclosed_at_shutdown(self):
+        self.addCleanup(unlink, TESTFN)
+        script_helper.assert_python_ok("-c", f"""if 1:
+            import zipfile
+            zf = zipfile.ZipFile({TESTFN!r}, "w")
+            zf.writestr("f.txt", b"data")
+        """)
+        with zipfile.ZipFile(TESTFN) as zf:
+            self.assertEqual(zf.namelist(), ["f.txt"])
 
     def test_unsupported_version(self):
         # File has an extract_version of 120
