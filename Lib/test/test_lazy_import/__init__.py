@@ -308,6 +308,32 @@ class LazyImportTypeTests(LazyImportTestCase):
         """)
         assert_python_ok("-c", code)
 
+    @support.requires_subprocess()
+    def test_deeply_dotted_name(self):
+        """A long dotted name must not overflow the C stack."""
+        # Each name component adds a nested placeholder.
+        code = textwrap.dedent("""
+            import builtins, threading
+            class Anything:
+                def __getattr__(self, name):
+                    return self
+            anything = Anything()
+            ns = {"__builtins__": dict(vars(builtins),
+                                       __import__=lambda *args: anything)}
+            exec("lazy import " + ".".join(["m"] * 10_000) + " as x", ns)
+            def check(proxy):
+                assert repr(proxy).count(".") == 9_999
+                assert proxy.resolve() is anything
+                print("ok")
+            threading.stack_size(256 * 1024)
+            # Pass the proxy as an argument: loading it from a global reifies it.
+            t = threading.Thread(target=check, args=(ns.pop("x"),))
+            t.start()
+            t.join()
+        """)
+        proc = assert_python_ok("-c", code)
+        self.assertEqual(proc.out.strip(), b"ok")
+
 
 class SyntaxRestrictionTests(LazyImportTestCase):
     """Tests for syntax restrictions on lazy imports."""

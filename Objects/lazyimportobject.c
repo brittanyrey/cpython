@@ -199,19 +199,11 @@ lazy_import_getattro(PyObject *op, PyObject *name)
     return NULL;
 }
 
-// The dotted name of the object that resolving the placeholder returns.
+// The dotted name of the object that a root placeholder's import returns.
 static PyObject *
-lazy_import_path(PyLazyImportObject *m)
+lazy_import_root_path(PyLazyImportObject *m)
 {
-    if (PyLazyImport_CheckExact(m->lz_from)) {
-        PyObject *base = lazy_import_path((PyLazyImportObject *)m->lz_from);
-        if (base == NULL) {
-            return NULL;
-        }
-        PyObject *res = PyUnicode_FromFormat("%U.%U", base, m->lz_attr);
-        Py_DECREF(base);
-        return res;
-    }
+    assert(!PyLazyImport_CheckExact(m->lz_from));
     if (m->lz_attr != NULL &&
         (!PyTuple_Check(m->lz_attr) || PyTuple_GET_SIZE(m->lz_attr) > 0)) {
         return Py_NewRef(m->lz_from);
@@ -227,6 +219,55 @@ lazy_import_path(PyLazyImportObject *m)
         return Py_NewRef(m->lz_from);
     }
     return PyUnicode_Substring(m->lz_from, 0, dot);
+}
+
+// List the attribute names recorded from the root placeholder IMPORT_NAME
+// left down to lz, and set *root if given. `lazy import a.b.c` nests one placeholder
+// per name component, so the chain can be arbitrarily deep: don't recurse.
+static PyObject *
+lazy_import_attrs(PyLazyImportObject *lz, PyLazyImportObject **root)
+{
+    PyObject *attrs = PyList_New(0);
+    if (attrs == NULL) {
+        return NULL;
+    }
+    for (; PyLazyImport_CheckExact(lz->lz_from);
+         lz = (PyLazyImportObject *)lz->lz_from) {
+        if (PyList_Append(attrs, lz->lz_attr) < 0) {
+            Py_DECREF(attrs);
+            return NULL;
+        }
+    }
+    if (PyList_Reverse(attrs) < 0) {
+        Py_DECREF(attrs);
+        return NULL;
+    }
+    if (root != NULL) {
+        *root = lz;
+    }
+    return attrs;
+}
+
+// The dotted name of the object that resolving the placeholder returns.
+static PyObject *
+lazy_import_path(PyLazyImportObject *m)
+{
+    if (!PyLazyImport_CheckExact(m->lz_from)) {
+        return lazy_import_root_path(m);
+    }
+    PyLazyImportObject *root;
+    PyObject *parts = lazy_import_attrs(m, &root);
+    if (parts == NULL) {
+        return NULL;
+    }
+    PyObject *res = NULL;
+    PyObject *base = lazy_import_root_path(root);
+    if (base != NULL && PyList_Insert(parts, 0, base) == 0) {
+        res = PyUnicode_Join(_Py_LATIN1_CHR('.'), parts);
+    }
+    Py_XDECREF(base);
+    Py_DECREF(parts);
+    return res;
 }
 
 static PyObject *
@@ -274,17 +315,19 @@ static PyObject *
 lazy_import_replay_from(PyThreadState *tstate, PyObject *mod,
                         PyLazyImportObject *lz)
 {
-    if (!PyLazyImport_CheckExact(lz->lz_from)) {
-        return Py_NewRef(mod);
-    }
-    PyObject *from = lazy_import_replay_from(
-        tstate, mod, (PyLazyImportObject *)lz->lz_from);
-    if (from == NULL) {
+    PyObject *attrs = lazy_import_attrs(lz, NULL);
+    if (attrs == NULL) {
         return NULL;
     }
-    PyObject *obj = _PyEval_ImportFrom(tstate, from, lz->lz_attr);
-    Py_DECREF(from);
-    return lazy_import_resolve_result(tstate, obj);
+    PyObject *obj = Py_NewRef(mod);
+    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(attrs) && obj != NULL; i++) {
+        PyObject *from = obj;
+        obj = _PyEval_ImportFrom(tstate, from, PyList_GET_ITEM(attrs, i));
+        Py_DECREF(from);
+        obj = lazy_import_resolve_result(tstate, obj);
+    }
+    Py_DECREF(attrs);
+    return obj;
 }
 
 // Preserve the resolution error and attach the import's declaration location.
