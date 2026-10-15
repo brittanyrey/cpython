@@ -2672,6 +2672,7 @@ TESTSUBDIRS=	idlelib/idle_test \
 		test/test_lazy_import \
 		test/test_lazy_import/data \
 		test/test_lazy_import/data/pkg \
+		test/test_lazy_import/data/shadowed_submodule \
 		test/test_lazy_import/data/badsyntax \
 		test/test_lazy_import/data/circular_import_pkg \
 		test/test_lazy_import/data/lazypkg \

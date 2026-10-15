@@ -18,8 +18,12 @@ PyAPI_FUNC(PyObject *) _PyLazyImport_New(
     struct _PyInterpreterFrame *frame, PyObject *builtins,
     PyObject *name, PyObject *fromlist);
 
+extern PyObject *_PyLazyImport_NewChild(PyObject *declaration, PyObject *name);
 extern PyObject *_PyLazyImport_LoadChild(
     PyThreadState *tstate, PyObject *declaration, PyObject *name);
+extern Py_ssize_t _PyLazyImport_GetLoadedPrefix(PyObject *declaration);
+extern void _PyLazyImport_NoteLoadedPrefix(PyObject *declaration,
+                                           Py_ssize_t length);
 extern int _PyLazyImport_IsActive(PyObject *declaration);
 
 extern int _PyLazyImport_IsResolving(PyThreadState *tstate, PyObject *op);

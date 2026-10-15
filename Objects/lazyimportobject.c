@@ -28,6 +28,9 @@ typedef struct {
     int lz_instr_offset;
     // The root was accessed, so its declared path requires import semantics.
     int lz_active;
+    // Length of the longest parent of the declared path that was in
+    // sys.modules at registration, or 0.
+    Py_ssize_t lz_loaded_prefix;
 } PyLazyImportObject;
 
 #define PyLazyImportObject_CAST(op) ((PyLazyImportObject *)(op))
@@ -74,6 +77,7 @@ _PyLazyImport_New(_PyInterpreterFrame *frame, PyObject *builtins,
     m->lz_code = NULL;
     m->lz_instr_offset = -1;
     m->lz_active = 0;
+    m->lz_loaded_prefix = 0;
 
     if (frame != NULL) {
         m->lz_code = (PyCodeObject *)Py_NewRef(_PyFrame_GetCode(frame));
@@ -567,10 +571,10 @@ _PyImport_LoadLazyImportTstate(PyThreadState *tstate, PyObject *lazy_import)
     return lazy_import_resolve_impl(tstate, lazy_import, NULL);
 }
 
-// Resolve a pending child as an aliased import, preserving its declaration.
+// Return a placeholder for a pending child, as an aliased import that
+// preserves its declaration.
 PyObject *
-_PyLazyImport_LoadChild(PyThreadState *tstate, PyObject *declaration,
-                        PyObject *name)
+_PyLazyImport_NewChild(PyObject *declaration, PyObject *name)
 {
     assert(PyLazyImport_CheckExact(declaration));
     PyLazyImportObject *source = PyLazyImportObject_CAST(declaration);
@@ -599,6 +603,19 @@ _PyLazyImport_LoadChild(PyThreadState *tstate, PyObject *declaration,
     PyLazyImportObject *child = PyLazyImportObject_CAST(lz);
     child->lz_code = (PyCodeObject *)Py_XNewRef(source->lz_code);
     child->lz_instr_offset = source->lz_instr_offset;
+    return lz;
+}
+
+// Resolve a pending child, preserving its declaration.
+PyObject *
+_PyLazyImport_LoadChild(PyThreadState *tstate, PyObject *declaration,
+                        PyObject *name)
+{
+    PyLazyImportObject *source = PyLazyImportObject_CAST(declaration);
+    PyObject *lz = _PyLazyImport_NewChild(declaration, name);
+    if (lz == NULL) {
+        return NULL;
+    }
     PyObject *result = _PyImport_LoadLazyImportTstate(tstate, lz);
     Py_DECREF(lz);
     if (result != NULL && PyModule_Check(result) &&
@@ -609,6 +626,25 @@ _PyLazyImport_LoadChild(PyThreadState *tstate, PyObject *declaration,
         return _PyLazyImport_LoadChild(tstate, declaration, source->lz_from);
     }
     return result;
+}
+
+Py_ssize_t
+_PyLazyImport_GetLoadedPrefix(PyObject *declaration)
+{
+    assert(PyLazyImport_CheckExact(declaration));
+    return FT_ATOMIC_LOAD_SSIZE_RELAXED(
+        PyLazyImportObject_CAST(declaration)->lz_loaded_prefix);
+}
+
+// Registration visits parents from the longest, so keep the first one noted.
+void
+_PyLazyImport_NoteLoadedPrefix(PyObject *declaration, Py_ssize_t length)
+{
+    assert(PyLazyImport_CheckExact(declaration));
+    PyLazyImportObject *lz = PyLazyImportObject_CAST(declaration);
+    if (FT_ATOMIC_LOAD_SSIZE_RELAXED(lz->lz_loaded_prefix) == 0) {
+        FT_ATOMIC_STORE_SSIZE_RELAXED(lz->lz_loaded_prefix, length);
+    }
 }
 
 int

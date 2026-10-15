@@ -1,0 +1,3 @@
+Fix a lazy ``import pkg.sub`` resolving ``pkg.sub`` to an attribute that
+``pkg/__init__.py`` binds under the same name, instead of to the submodule.
+As with an eager import, the submodule now replaces the attribute.

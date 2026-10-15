@@ -4223,6 +4223,55 @@ ensure_lazy_pending_submodules(PyDictObject *lazy_modules, PyObject *parent)
     return lazy_submodules;
 }
 
+// An eager `import parent.child` rebinds parent.child to the submodule even
+// when parent already binds that name, and a lookup that finds the name never
+// reaches the pending-child fallback in _Py_module_getattro_impl.  Once parent
+// finishes loading, bind the name to a placeholder for the submodule instead.
+static int
+bind_shadowed_lazy_submodule(PyThreadState *tstate, PyObject *module,
+                             PyObject *parent, PyObject *child,
+                             PyObject *declaration)
+{
+    if (!PyModule_Check(module)) {
+        return 0;
+    }
+    PyObject *dict = _PyModule_GetDict(module);
+    PyObject *value;
+    int rc = PyDict_GetItemRef(dict, child, &value);
+    if (rc <= 0) {
+        return rc;
+    }
+    // Leave a lazy import that the parent made itself.
+    rc = PyLazyImport_CheckExact(value);
+    Py_DECREF(value);
+    if (rc) {
+        return 0;
+    }
+    // Only a package has submodules to rebind.
+    rc = PyDict_Contains(dict, &_Py_ID(__path__));
+    if (rc <= 0) {
+        return rc;
+    }
+    PyObject *fullname = PyUnicode_FromFormat("%U.%U", parent, child);
+    if (fullname == NULL) {
+        return -1;
+    }
+    // An eager import of a loaded submodule does not rebind it either.
+    PyObject *lazy = NULL;
+    PyObject *loaded = import_get_module(tstate, fullname);
+    if (loaded != NULL || PyErr_Occurred()) {
+        rc = loaded == NULL ? -1 : 0;
+        goto done;
+    }
+    lazy = _PyLazyImport_NewChild(declaration, fullname);
+    rc = lazy == NULL ? -1 : PyDict_SetItem(dict, child, lazy);
+done:
+    Py_XDECREF(lazy);
+    Py_XDECREF(loaded);
+    Py_DECREF(fullname);
+    return rc;
+}
+
 // Records all parent-child relationships in lazy_pending_submodules
 // for a lazily imported module name. When a parent module's attribute
 // is accessed, _Py_module_getattro_impl will check lazy_pending_submodules
@@ -4253,7 +4302,6 @@ register_lazy_on_parent(PyThreadState *tstate, PyObject *name, PyObject *source)
         }
 
         PyObject *submodules = ensure_lazy_pending_submodules(pending, parent);
-        Py_DECREF(parent);
         PyObject *fullname = PyUnicode_Substring(name, 0, end);
         PyObject *cached = fullname == NULL ? NULL :
             import_get_module(tstate, fullname);
@@ -4265,7 +4313,20 @@ register_lazy_on_parent(PyThreadState *tstate, PyObject *name, PyObject *source)
                 PyDict_SetDefaultRef(submodules, child, value, NULL) :
                 PyDict_SetItem(submodules, child, value);
         }
+        // Parents already loaded, or loading, keep what they bind, as they
+        // would after an eager import.  Record how far those go.
+        if (err == 0 && value != Py_None) {
+            PyObject *module = import_get_module(tstate, parent);
+            if (module != NULL) {
+                _PyLazyImport_NoteLoadedPrefix(source, dot);
+                Py_DECREF(module);
+            }
+            else if (PyErr_Occurred()) {
+                err = -1;
+            }
+        }
         Py_XDECREF(cached);
+        Py_DECREF(parent);
         Py_DECREF(child);
         Py_XDECREF(submodules);
         if (err < 0) {
@@ -5600,7 +5661,37 @@ _imp__set_lazy_attributes_impl(PyObject *module, PyObject *modobj,
     if (_PyImport_DiscardLazyModule(interp, name) < 0) {
         return NULL;
     }
-    if (_PyImport_ClearLazySubmodule(_PyThreadState_GET(), name, 0) < 0) {
+    PyThreadState *tstate = _PyThreadState_GET();
+    if (_PyImport_ClearLazySubmodule(tstate, name, 0) < 0) {
+        return NULL;
+    }
+    PyObject *pending = LAZY_PENDING_SUBMODULES(interp), *children;
+    if (pending == NULL || PyDict_GET_SIZE(pending) == 0) {
+        Py_RETURN_NONE;
+    }
+    if (PyDict_GetItemRef(pending, name, &children) <= 0) {
+        return PyErr_Occurred() ? NULL : Py_NewRef(Py_None);
+    }
+    // Snapshot: binding a child can register more pending names.
+    PyObject *items = PyDict_Items(children);
+    Py_DECREF(children);
+    if (items == NULL) {
+        return NULL;
+    }
+    Py_ssize_t length = PyUnicode_GET_LENGTH(name);
+    int err = 0;
+    for (Py_ssize_t i = 0; err == 0 && i < PyList_GET_SIZE(items); i++) {
+        PyObject *child = PyTuple_GET_ITEM(PyList_GET_ITEM(items, i), 0);
+        PyObject *declaration = PyTuple_GET_ITEM(PyList_GET_ITEM(items, i), 1);
+        // Skip a declaration made while this module was already loading.
+        if (declaration != Py_None &&
+            _PyLazyImport_GetLoadedPrefix(declaration) < length) {
+            err = bind_shadowed_lazy_submodule(tstate, modobj, name, child,
+                                               declaration);
+        }
+    }
+    Py_DECREF(items);
+    if (err < 0) {
         return NULL;
     }
     Py_RETURN_NONE;

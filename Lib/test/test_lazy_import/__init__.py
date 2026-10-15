@@ -2678,6 +2678,34 @@ class ModuleVariableNameCollisionTests(unittest.TestCase):
         """)
         assert_python_ok("-c", code)
 
+    def test_lazy_import_wins_over_package_attribute(self):
+        """A dotted lazy import binds the submodule a package attribute hides."""
+        # gh-151208: like the eager import, which rebinds the name.
+        check = textwrap.dedent("""
+            import sys
+            name = "test.test_lazy_import.data.shadowed_submodule.sub"
+            assert name not in sys.modules
+            assert pkg.sub is sys.modules[name], pkg.sub
+        """)
+        for code in (
+            """
+            lazy import test.test_lazy_import.data.shadowed_submodule.sub
+            pkg = test.test_lazy_import.data.shadowed_submodule
+            """,
+            """
+            lazy import test.test_lazy_import.data.shadowed_submodule as pkg
+            lazy import test.test_lazy_import.data.shadowed_submodule.sub
+            """,
+        ):
+            with self.subTest(code=code):
+                assert_python_ok("-c", textwrap.dedent(code) + check)
+
+    def test_package_attribute_after_lazy_import_wins(self):
+        """A package binding a name after lazily importing it keeps the name."""
+        from test.test_lazy_import.data import shadowed_submodule
+        self.assertEqual(shadowed_submodule.other,
+                         "bound after importing the other submodule")
+
     def test_dotted_as_of_loaded_module(self):
         """A dotted lazy import as binds the module, not a same-named attribute."""
         # importlib.metadata is already loaded and has a `metadata` attribute.
